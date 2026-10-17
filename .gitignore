@@ -1,0 +1,12 @@
+build/
+build-artifacts/
+.venv/
+.venv-fprime/
+__pycache__/
+*.pyc
+cmake-build-*/
+.cache/
+*.exe
+*.obj
+*.pdb
+.vs/

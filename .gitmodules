@@ -1,0 +1,8 @@
+[submodule "third_party/fprime"]
+	path = third_party/fprime
+	url = https://github.com/nasa/fprime.git
+	branch = devel
+[submodule "third_party/basilisk"]
+	path = third_party/basilisk
+	url = https://github.com/AVSLab/basilisk.git
+	branch = develop
