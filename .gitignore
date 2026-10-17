@@ -9,4 +9,5 @@ cmake-build-*/
 *.exe
 *.obj
 *.pdb
+advisor/advisor.log
 .vs/

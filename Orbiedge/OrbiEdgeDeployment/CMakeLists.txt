@@ -1,0 +1,15 @@
+register_fprime_module(
+  AUTOCODER_INPUTS
+    "${CMAKE_CURRENT_LIST_DIR}/instances.fpp"
+    "${CMAKE_CURRENT_LIST_DIR}/topology.fpp"
+  SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/OrbiEdgeTopology.cpp"
+  HEADERS
+    "${CMAKE_CURRENT_LIST_DIR}/OrbiEdgeTopology.hpp"
+    "${CMAKE_CURRENT_LIST_DIR}/OrbiEdgeTopologyDefs.hpp"
+  DEPENDS
+    Orbiedge_SimBridge
+    Orbiedge_BusMonitor
+    Orbiedge_FdirManager
+    Orbiedge_AgentUplinkFilter
+)

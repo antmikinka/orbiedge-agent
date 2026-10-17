@@ -10,7 +10,11 @@ The stand-in attitude controller stays in the Basilisk script: `inertial3D`, `at
 | --- | --- |
 | `sim/scenarios/leo_3u_nominal.py` | 3U LEO scenario, three physical faults, ZeroMQ publisher |
 | `sim/bridge/packet.py` | 256-byte `BSK1` packet |
-| `Orbiedge/TelemetryMonitor/` | F Prime active component |
+| `sim/scenarios/leo_rw_power_fdir.py` | RW-power plant, four HR16 wheels, 10 Hz JSON |
+| `sim/fdir/` | Python flight-rule mirror |
+| `sim/canned/` | In-process thermal acceptance and the five-family matrix |
+| `advisor/` | Windows advisor. Sends nothing when the model is absent |
+| `Orbiedge/TelemetryMonitor/` | F Prime active component, `BSK1` subscriber |
 | `third_party/fprime` | submodule, [nasa/fprime](https://github.com/nasa/fprime) `devel` |
 | `third_party/basilisk` | submodule, [AVSLab/basilisk](https://github.com/AVSLab/basilisk) `develop` |
 
@@ -109,6 +113,38 @@ cmake --build "$HOME/orbiedge-build" --target Orbiedge_TelemetryMonitor
 
 That build completed on Ubuntu 24.04 in WSL and linked `zmq_connect`, `zmq_msg_recv`, and `zmq_setsockopt` into `Orbiedge_TelemetryMonitor`. The component does not link Basilisk.
 
-## What this stub leaves out
+## Two bridges
 
-A separate OrbiEdge architecture note describes a later bridge: 10 Hz JSON on `127.0.0.1:5600` and `:5601`, and F Prime components named `SimBridge`, `BusMonitor`, and `FdirManager`, plus a Windows NPU advisor. That topology is not in this repository. This tree is the execution checklist: the public submodule pins, the 0.5 s Basilisk scenario, and `TelemetryMonitor`.
+The 0.5 s `BSK1` packet on `tcp://127.0.0.1:5555` stays. `TelemetryMonitor` is still the only component that reads it, and it still does not command wheels.
+
+The architecture loop is a second contract. `sim/scenarios/leo_rw_power_fdir.py` starts from `scenarioAttitudeFeedbackRWPower` (hub 750 kg, inertia diag(900, 800, 600), Honeywell HR16, `SimpleBattery`). The example file has three orthogonal wheels. This scenario adds a fourth wheel in a pyramid at 400 RPM. `rwMotorTorque.controlAxes_B` on this Basilisk build is nine doubles, the three body control axes, so the identity is written there. The pyramid axes are the wheel spin axes.
+
+One attitude chain remains: `inertial3D`, `attTrackingError`, `mrpFeedback`, `rwMotorTorque`. A mode line is not a second controller. `WheelTorqueGate` edits that command: `ISOLATE_RW` zeros the named wheel, `MOMENTUM_DUMP` scales every wheel command by 0.2, and `SAFE` zeros every command and holds the current MRP. There is no magnetorquer. `LOAD_SHED` sets the payload sink from -5 W to 0 W. The power example has no solar array. The solar family ramps `solar_scale` toward 0.4 and applies a separate sink, `solarDeficit`, so state of charge can fall. That sink turns off at SOC 0.20.
+
+Sensor lines are newline-delimited JSON bound on `127.0.0.1:5600`. Mode lines are read from `127.0.0.1:5601`. Addresses are loopback only.
+
+`sim/fdir/rules.py` is the flight-rule mirror: 10 Hz, four wheels, overspeed at 0.9 of 628.3185307179587 rad/s for 10 samples, dump-rise at 30 s, stddev 1.0 versus 0.2 over 20 samples, SOC 0.30 and 0.15, temperature 40 C and 60 C. Critical faults apply the default mode on that tick. `AGENT.PROPOSE` cannot clear a sticky `ISOLATE_RW` or `SAFE`.
+
+```text
+python tests/test_fdir_rules.py
+python -m sim.canned.thermal_critical
+python -m sim.canned.run_matrix
+```
+
+The thermal script ends in `SAFE` with no proposal. The matrix is 5 families by 20 seeds, in process, against the Python mirror. `tests/golden/fdir_matrix_summary.json` records 100 passes. That file is not a Basilisk campaign. A 1 s nominal plant probe and a 3 s jitter probe were run with Basilisk 2.12.0. The jitter family publishes a +/- 3 rad/s square wave on one wheel after 2 s and holds the other three samples. The 100-run Basilisk matrix has not been run.
+
+## Advisor
+
+`advisor` is a Windows process. It may emit only `AGENT.PROPOSE` to `127.0.0.1:50001`. It does not open 5600, 5601, or 50000. Parser failure sends nothing. `choose_default` is a test helper and is not transmitted. The opcode in the frame is the string `AGENT.PROPOSE` until a generated F´ dictionary supplies a number.
+
+Ryzen AI Software 1.8.0 is installed. `onnxruntime_genai` 0.9.2.1 imports. The Llama 3.2 1B hybrid weights are not on disk, nothing was downloaded, and no tokens were generated. `advisor/PROBE.md` records that probe. A cached AMD-OLMo hybrid snapshot is not this model.
+
+## Flight sources
+
+`Orbiedge/SimBridge`, `BusMonitor`, `FdirManager`, and `AgentUplinkFilter` are the F´ sources for the 10 Hz loop. `Orbiedge/FdirRules/FdirRules.hpp` is the C++ mirror of `sim/fdir/rules.py` and does not need the autocoder. `clang++ -std=c++17` compiles `tests/test_fdir_rules.cpp` against that header.
+
+`Orbiedge/Topology/OrbiEdgeTopology.fpp` connects the ports those components declare: `PowerState`, `ThermalState`, `AdcsState`, `FaultRecord`, `modeOut`, and `clearOut`. It does not instance a rate group, a command dispatcher, or the two TCP servers. `Orbiedge/OrbiEdgeDeployment/` and `Orbiedge/FdirTypes/` are not on the configure path. The deployment topology names ports the components do not have, and `FdirTypes.fpp` repeats `module Orbiedge` types with different fields. Nothing here was autocoded, and there is still no bootable binary.
+
+F´ `devel` has no Windows platform. `Svc/Time` does not exist in the pin. The closest time hook is `Svc.OsTime`: `setEpoch` and the command `SetCurrentTime`. `SimBridge` stores `sim_time_ns` and does not call a guessed time-set port. `nasa/fprime-gds` is not pinned. Basilisk is pinned to `develop`, not a release tag.
+
+UbuntuOEM (WSL2, Ubuntu 24.04.3 LTS) bound `127.0.0.1` ports 50000, 50001, 5600, and 5601, and a Windows TCP client connected to each. The default WSL distro in this session is `docker-desktop`, which was stopped. That probe did not boot F´. RSS, TTFT, and a Windows power counter were not measured because the specified model was not loaded. `docs/PHASE0.md` records the same facts.
