@@ -91,15 +91,23 @@ A 121 s `--no-zmq` run on Basilisk 2.12.0 completed 242 steps. The MRP moved fro
 - An accepted packet updates `SimTimeNs`, `q_BN`, `omega_BN_B`, `BusVoltage`, `WheelSpeeds`, `FaultFlags`, and `PacketsAccepted`, emits `PacketAccepted`, and invokes `stateOut` when that port is connected.
 - A bad size, magic, version, or CRC emits `PacketRejected` and does not change the last good telemetry.
 
-`settings.ini` points the framework path at `third_party/fprime`. There is no deployment in this repository yet, so `fprime-util generate` only registers this library. It does not produce a bootable binary. A later topology wires `schedIn` to a rate group, the command ports to the command dispatcher, and `stateOut` to whatever records the sample. That generate step needs the F Prime submodule and `libzmq`.
+`settings.ini` points the framework path at `third_party/fprime`. There is no deployment in this repository yet, so the build produces the static library `libOrbiedge_TelemetryMonitor.a`. It does not produce a bootable binary. A later topology wires `schedIn` to a rate group, the command ports to the command dispatcher, and `stateOut` to whatever records the sample.
 
-```text
-# WSL or Ubuntu, after scripts/init_submodules.ps1
-sudo apt install libzmq3-dev
-fprime-util generate
+F´ `devel` has no Windows platform. Configure on Linux or on WSL Ubuntu. CMake must be 3.26 or newer (`/usr/bin/cmake` on Ubuntu 24.04 is 3.28). The depth-1 F´ pin does not include googletest, so leave `BUILD_TESTING` off. The module requires libzmq (`sudo apt install libzmq3-dev`, or pass `CMAKE_PREFIX_PATH` to a libzmq 4.3 install). The Python tools used here are `fprime-tools==4.4.0`, `fprime-fpp==3.4.0`, and `fprime-jre==25.0.4.1.1`, with `JAVA_HOME` pointed at that JRE.
+
+```bash
+export PATH="$HOME/orbiedge-fprime-venv/bin:/usr/bin:/bin"
+export JAVA_HOME="$HOME/orbiedge-fprime-venv/lib/python3.12/site-packages/fprime_jre/runtime"
+export PATH="$JAVA_HOME/bin:$PATH"
+cmake -S . -B "$HOME/orbiedge-build" -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH="$HOME/opt/libzmq" \
+  -DBUILD_TESTING=OFF \
+  -DFPRIME_ENABLE_FRAMEWORK_UTS=OFF \
+  -DFPRIME_ENABLE_AUTOCODER_UTS=OFF
+cmake --build "$HOME/orbiedge-build" --target Orbiedge_TelemetryMonitor
 ```
 
-On Windows, point `CMAKE_PREFIX_PATH` at a ZeroMQ install before configuring. The component does not link Basilisk.
+That build completed on Ubuntu 24.04 in WSL and linked `zmq_connect`, `zmq_msg_recv`, and `zmq_setsockopt` into `Orbiedge_TelemetryMonitor`. The component does not link Basilisk.
 
 ## What this stub leaves out
 
