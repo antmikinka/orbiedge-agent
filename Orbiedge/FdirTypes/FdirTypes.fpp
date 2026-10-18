@@ -1,5 +1,3 @@
-# Not on the configure path. BusMonitor.fpp already defines these names
-# in module Orbiedge, and several fields differ.
 module Orbiedge {
 
   @ Flight mode. FdirManager is the only component that may select one.
@@ -55,10 +53,10 @@ module Orbiedge {
 
   port ModeRequest(simTimeNs: U64, mode: Mode, wheelIndex: U8)
 
-  @ opcode 0 is AGENT.PROPOSE. Any other opcode is refused by AgentUplinkFilter.
+  @ proposeOpcode 0 is AGENT.PROPOSE. Any other value is refused by AgentUplinkFilter.
   port Proposal(
-    opcode: U32
-    action: Mode
+    proposeOpcode: U32
+    requestedMode: Mode
     wheelIndex: U8
     confidence: F32
     simTimeNs: U64

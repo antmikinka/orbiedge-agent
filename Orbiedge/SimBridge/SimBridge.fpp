@@ -1,37 +1,38 @@
 module Orbiedge {
 
-  @ Active bridge. schedIn is async drop so the rate group only enqueues.
-  @ The handler runs on this component's thread. That thread owns the TCP client
-  @ to 127.0.0.1:5600 and the mode writer bound to 127.0.0.1:5601.
-  @ Svc.Time (Svc/Interfaces/Time.fpp) has only timeGetPort. No set port was found.
-  @ Svc.OsTime setEpoch and SetCurrentTime are a different component. stampSimTime(U64)
-  @ is the typed hook. The topology must connect the real time-set port later.
+  @ TCP client of Basilisk sensor JSON on 127.0.0.1:5600.
+  @ TCP server for mode JSON on 127.0.0.1:5601.
+  @ TCP server for advisor lines on 127.0.0.1:50001.
+  @ Does not open 0.0.0.0 or the human GDS port 50000.
   active component SimBridge {
 
-    async input port schedIn: Svc.Sched drop
+    async input port run: Svc.Sched drop
 
-    @ Mode from FdirManager. Queued so the JSON write stays on this thread.
-    async input port modeIn: ModeFlag
+    sync input port modeIn: ModeRequest
 
-    output port PowerState: PowerStatePort
+    output port timeEpochSet: Svc.OsTimeEpoch
 
-    output port ThermalState: ThermalStatePort
+    output port powerOut: PowerState
 
-    output port AdcsState: AdcsStatePort
+    output port thermalOut: ThermalState
 
-    telemetry SENSOR_VALID: bool id 0
+    output port adcsOut: AdcsState
 
-    event SensorLoss(
-      simTimeNs: U64
-    ) severity warning high id 0 format "Sensor loss at {} ns; last sample invalid"
+    output port commitOut: SampleCommit
 
-    event ParseFailed severity warning low id 1 format "Sensor JSON line rejected" throttle 5
+    output port sensorValidOut: SensorValid
 
-    event LinkFailed severity warning low id 2 format "127.0.0.1 sensor or mode socket failed" throttle 5
+    output port filterSetTime: SimTimeStamp
+
+    output port proposalOut: Proposal
+
+    event Listening(listenPort: U16) severity activity high id 0 format "SimBridge listening on {}"
+
+    event BindFailed(listenPort: U16) severity warning high id 1 format "SimBridge bind failed on {}"
+
+    event SensorLost severity warning high id 2 format "SimBridge sensor silent for 500 ms"
 
     import Fw.Event
-
-    import Fw.Channel
 
     time get port timeGetOut
 

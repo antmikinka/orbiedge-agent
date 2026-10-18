@@ -49,7 +49,7 @@ module Orbiedge {
 
   instance fatalAdapter: Svc.AssertFatalAdapter base id 0x10035000
 
-  instance cmdSeq: Svc.CmdSequencer base id 0x10036000 \
+  instance commandSeq: Svc.CmdSequencer base id 0x10036000 \
     queue size QUEUE_SIZE \
     stack size STACK_SIZE \
     priority 30

@@ -1,168 +1,297 @@
 #include "Orbiedge/BusMonitor/BusMonitor.hpp"
 
-namespace {
+#include "Orbiedge/FdirTypes/FdirTypes.hpp"
 
-Orbiedge::FdirRules::Mode toRules(Orbiedge::Mode mode) {
-    switch (mode) {
-        case Orbiedge::Mode::NOMINAL:
-            return Orbiedge::FdirRules::Mode::NOMINAL;
-        case Orbiedge::Mode::ISOLATE_RW:
-            return Orbiedge::FdirRules::Mode::ISOLATE_RW;
-        case Orbiedge::Mode::MOMENTUM_DUMP:
-            return Orbiedge::FdirRules::Mode::MOMENTUM_DUMP;
-        case Orbiedge::Mode::LOAD_SHED:
-            return Orbiedge::FdirRules::Mode::LOAD_SHED;
-        case Orbiedge::Mode::SAFE:
-            return Orbiedge::FdirRules::Mode::SAFE;
-        default:
-            return Orbiedge::FdirRules::Mode::NOMINAL;
-    }
-}
-
-Orbiedge::Mode fromRules(Orbiedge::FdirRules::Mode mode) {
-    switch (mode) {
-        case Orbiedge::FdirRules::Mode::NOMINAL:
-            return Orbiedge::Mode::NOMINAL;
-        case Orbiedge::FdirRules::Mode::ISOLATE_RW:
-            return Orbiedge::Mode::ISOLATE_RW;
-        case Orbiedge::FdirRules::Mode::MOMENTUM_DUMP:
-            return Orbiedge::Mode::MOMENTUM_DUMP;
-        case Orbiedge::FdirRules::Mode::LOAD_SHED:
-            return Orbiedge::Mode::LOAD_SHED;
-        case Orbiedge::FdirRules::Mode::SAFE:
-            return Orbiedge::Mode::SAFE;
-        default:
-            return Orbiedge::Mode::NOMINAL;
-    }
-}
-
-Orbiedge::Severity fromSeverity(Orbiedge::FdirRules::Severity severity) {
-    switch (severity) {
-        case Orbiedge::FdirRules::Severity::WARNING:
-            return Orbiedge::Severity::WARNING;
-        case Orbiedge::FdirRules::Severity::CRITICAL:
-            return Orbiedge::Severity::CRITICAL;
-        case Orbiedge::FdirRules::Severity::NONE:
-        default:
-            return Orbiedge::Severity::NONE;
-    }
-}
-
-}  // namespace
+#include <cmath>
 
 namespace Orbiedge {
 
 BusMonitor::BusMonitor(const char* const compName)
     : BusMonitorComponentBase(compName),
-      m_mode(FdirRules::Mode::NOMINAL),
-      m_powerSeen(false),
-      m_thermalSeen(false),
-      m_powerTime(0),
-      m_thermalTime(0),
-      m_soc(0.0),
-      m_solarScale(0.0),
-      m_powerValid(false),
-      m_tempC(0.0),
+      m_mutex(),
+      m_havePower(false),
+      m_haveThermal(false),
+      m_haveAdcs(false),
+      m_soc(1.0),
+      m_solar(1.0),
+      m_temp(0.0),
       m_heaterOn(false),
-      m_thermalValid(false) {}
-
-BusMonitor::~BusMonitor() = default;
-
-void BusMonitor::loadThresholds() {
-    Fw::ParamValid valid;
-    FdirRules::Thresholds thresholds;
-    thresholds.wheel_max_rad_s = static_cast<double>(this->paramGet_WHEEL_MAX_RAD_S(valid));
-    thresholds.overspeed_fraction = static_cast<double>(this->paramGet_OVERSPEED_FRACTION(valid));
-    thresholds.overspeed_samples = static_cast<int>(this->paramGet_OVERSPEED_SAMPLES(valid));
-    thresholds.dump_rise_ns = static_cast<std::uint64_t>(this->paramGet_DUMP_RISE_NS(valid));
-    thresholds.stddev_high = static_cast<double>(this->paramGet_STDDEV_HIGH(valid));
-    thresholds.stddev_quiet = static_cast<double>(this->paramGet_STDDEV_QUIET(valid));
-    thresholds.stddev_samples = static_cast<int>(this->paramGet_STDDEV_SAMPLES(valid));
-    thresholds.soc_warn = static_cast<double>(this->paramGet_SOC_WARN(valid));
-    thresholds.soc_crit = static_cast<double>(this->paramGet_SOC_CRIT(valid));
-    thresholds.soc_samples = static_cast<int>(this->paramGet_SOC_SAMPLES(valid));
-    thresholds.temp_warn_c = static_cast<double>(this->paramGet_TEMP_WARN_C(valid));
-    thresholds.temp_crit_c = static_cast<double>(this->paramGet_TEMP_CRIT_C(valid));
-    thresholds.temp_crit_samples = static_cast<int>(this->paramGet_TEMP_CRIT_SAMPLES(valid));
-    thresholds.temp_warn_samples = static_cast<int>(this->paramGet_TEMP_WARN_SAMPLES(valid));
-    thresholds.quiet_dwell_ns = static_cast<std::uint64_t>(this->paramGet_QUIET_DWELL_NS(valid));
-    this->m_rules.set_thresholds(thresholds);
+      m_wheels{0.0, 0.0, 0.0, 0.0},
+      m_hist{},
+      m_histCount(0),
+      m_histNext(0),
+      m_maxWheel(0.0),
+      m_wheelWarnSamples(0),
+      m_socWarnSamples(0),
+      m_socCritSamples(0),
+      m_lastSocNs(0),
+      m_haveSocSample(false),
+      m_tempCritTiming(false),
+      m_tempCritSince(0),
+      m_tempWarnTiming(false),
+      m_tempWarnSince(0),
+      m_dumpTiming(false),
+      m_dumpSince(0),
+      m_dumpSpeedStart(0.0),
+      m_currentMode(Mode::NOMINAL),
+      m_stickySafe(false),
+      m_stickyIsolate(false),
+      m_isolateWheel(0),
+      m_sentSeverity(Severity::NONE),
+      m_sentMode(Mode::NOMINAL),
+      m_sentWheel(0) {
+    (void)fdirTypesLinkAnchor();
 }
 
-void BusMonitor::emit(const FdirRules::FaultRecord& record) {
-    if (!this->isConnected_FaultRecord_OutputPort(0)) {
-        return;
-    }
-    this->FaultRecord_out(0, record.sim_time_ns, record.eligible, fromRules(record.default_mode),
-                          fromSeverity(record.severity), record.wheel_index, record.sensor_valid, record.quiet,
-                          record.temp_warn_event, record.soc, record.solar_scale, record.temp_c,
-                          record.wheel_speed_rad_s[0], record.wheel_speed_rad_s[1], record.wheel_speed_rad_s[2],
-                          record.wheel_speed_rad_s[3], record.wheel_stddev[0], record.wheel_stddev[1],
-                          record.wheel_stddev[2], record.wheel_stddev[3]);
+BusMonitor::~BusMonitor() {}
+
+F64 BusMonitor::magnitude(F64 value) {
+    return (value < 0.0) ? -value : value;
 }
 
-void BusMonitor::powerIn_handler(FwIndexType portNum, U64 simTimeNs, F64 soc, F64 solarScale, bool valid) {
+void BusMonitor::powerIn_handler(FwIndexType portNum, U64 simTimeNs, F64 soc, F64 solarScale) {
     (void)portNum;
     Os::ScopeLock lock(this->m_mutex);
-    this->m_powerSeen = true;
-    this->m_powerTime = simTimeNs;
-    this->m_soc = soc;
-    this->m_solarScale = solarScale;
-    this->m_powerValid = valid;
+    this->m_havePower = true;
+    this->m_solar = solarScale;
+    this->updateSoc(simTimeNs, soc);
 }
 
-void BusMonitor::thermalIn_handler(FwIndexType portNum, U64 simTimeNs, F64 tempC, bool heaterOn, bool valid) {
+void BusMonitor::thermalIn_handler(FwIndexType portNum, U64 simTimeNs, F64 tempC, bool heaterOn) {
     (void)portNum;
     Os::ScopeLock lock(this->m_mutex);
-    this->m_thermalSeen = true;
-    this->m_thermalTime = simTimeNs;
-    this->m_tempC = tempC;
+    this->m_haveThermal = true;
     this->m_heaterOn = heaterOn;
-    this->m_thermalValid = valid;
+    this->updateTemp(simTimeNs, tempC);
 }
 
-void BusMonitor::adcsIn_handler(FwIndexType portNum, U64 simTimeNs, F64 wheel0, F64 wheel1, F64 wheel2, F64 wheel3,
-                                bool valid) {
+void BusMonitor::adcsIn_handler(
+    FwIndexType portNum, U64 simTimeNs, F64 wheel0, F64 wheel1, F64 wheel2, F64 wheel3) {
     (void)portNum;
+    const F64 wheels[4] = {wheel0, wheel1, wheel2, wheel3};
     Os::ScopeLock lock(this->m_mutex);
-    if (!this->m_powerSeen || !this->m_thermalSeen) {
-        return;
-    }
-    this->loadThresholds();
-    FdirRules::Sample sample{};
-    sample.sim_time_ns = simTimeNs;
-    sample.soc = this->m_soc;
-    sample.solar_scale = this->m_solarScale;
-    sample.temp_c = this->m_tempC;
-    sample.heater_on = this->m_heaterOn;
-    sample.wheel_speed_rad_s[0] = wheel0;
-    sample.wheel_speed_rad_s[1] = wheel1;
-    sample.wheel_speed_rad_s[2] = wheel2;
-    sample.wheel_speed_rad_s[3] = wheel3;
-    const bool aligned = this->m_powerTime == simTimeNs && this->m_thermalTime == simTimeNs;
-    sample.valid = valid && this->m_powerValid && this->m_thermalValid && aligned;
-    const FdirRules::FaultRecord record = this->m_rules.observe(sample, this->m_mode);
-    this->m_powerSeen = false;
-    this->m_thermalSeen = false;
-    this->emit(record);
+    this->m_haveAdcs = true;
+    this->updateWheels(simTimeNs, wheels);
 }
 
-void BusMonitor::modeIn_handler(FwIndexType portNum, U64 simTimeNs, const Mode& mode, U8 wheelIndex) {
+void BusMonitor::commitIn_handler(FwIndexType portNum, U64 simTimeNs) {
+    (void)portNum;
+    this->publish(simTimeNs);
+}
+
+void BusMonitor::currentMode_handler(FwIndexType portNum, U64 simTimeNs, const Mode& mode, U8 wheelIndex) {
     (void)portNum;
     (void)simTimeNs;
     (void)wheelIndex;
     Os::ScopeLock lock(this->m_mutex);
-    this->m_mode = toRules(mode);
+    this->m_currentMode = mode;
 }
 
-void BusMonitor::clearIn_handler(FwIndexType portNum, bool reset) {
+void BusMonitor::clearSticky_handler(FwIndexType portNum, U8 source) {
     (void)portNum;
-    if (!reset) {
+    (void)source;
+    U64 simTime = 0;
+    {
+        Os::ScopeLock lock(this->m_mutex);
+        this->m_stickySafe = false;
+        this->m_stickyIsolate = false;
+        simTime = this->m_lastSocNs;
+    }
+    this->publish(simTime);
+}
+
+void BusMonitor::updateSoc(U64 simTimeNs, F64 soc) {
+    this->m_soc = soc;
+    if (this->m_haveSocSample && simTimeNs < this->m_lastSocNs + BusMonitor::ONE_SEC_NS) {
         return;
     }
-    Os::ScopeLock lock(this->m_mutex);
-    this->m_rules.clear_monitor();
-    this->m_mode = FdirRules::Mode::NOMINAL;
+    this->m_haveSocSample = true;
+    this->m_lastSocNs = simTimeNs;
+    if (soc < BusMonitor::SOC_CRIT) {
+        this->m_socCritSamples = this->m_socCritSamples + 1U;
+        this->m_socWarnSamples = this->m_socWarnSamples + 1U;
+        return;
+    }
+    this->m_socCritSamples = 0;
+    if (soc < BusMonitor::SOC_WARN) {
+        this->m_socWarnSamples = this->m_socWarnSamples + 1U;
+        return;
+    }
+    this->m_socWarnSamples = 0;
+}
+
+void BusMonitor::updateTemp(U64 simTimeNs, F64 tempC) {
+    this->m_temp = tempC;
+    if (tempC > BusMonitor::TEMP_CRIT_C) {
+        if (!this->m_tempCritTiming) {
+            this->m_tempCritTiming = true;
+            this->m_tempCritSince = simTimeNs;
+        }
+    } else {
+        this->m_tempCritTiming = false;
+    }
+    if (tempC > BusMonitor::TEMP_WARN_C && tempC <= BusMonitor::TEMP_CRIT_C) {
+        if (!this->m_tempWarnTiming) {
+            this->m_tempWarnTiming = true;
+            this->m_tempWarnSince = simTimeNs;
+        }
+    } else {
+        this->m_tempWarnTiming = false;
+    }
+}
+
+void BusMonitor::updateWheels(U64 simTimeNs, const F64 wheels[4]) {
+    F64 maxWheel = 0.0;
+    for (U32 index = 0; index < 4U; index++) {
+        this->m_wheels[index] = wheels[index];
+        this->m_hist[index][this->m_histNext] = wheels[index];
+        const F64 speed = BusMonitor::magnitude(wheels[index]);
+        if (speed > maxWheel) {
+            maxWheel = speed;
+        }
+    }
+    this->m_histNext = (this->m_histNext + 1U) % BusMonitor::HIST;
+    if (this->m_histCount < BusMonitor::HIST) {
+        this->m_histCount = this->m_histCount + 1U;
+    }
+    this->m_maxWheel = maxWheel;
+    if (maxWheel > BusMonitor::WHEEL_WARN_FRAC * BusMonitor::WHEEL_MAX_RAD_S) {
+        this->m_wheelWarnSamples = this->m_wheelWarnSamples + 1U;
+    } else {
+        this->m_wheelWarnSamples = 0;
+    }
+    if (this->m_currentMode == Mode::MOMENTUM_DUMP) {
+        if (!this->m_dumpTiming) {
+            this->m_dumpTiming = true;
+            this->m_dumpSince = simTimeNs;
+            this->m_dumpSpeedStart = maxWheel;
+        }
+    } else {
+        this->m_dumpTiming = false;
+    }
+}
+
+F64 BusMonitor::wheelStddev(U32 index) const {
+    if (this->m_histCount == 0U) {
+        return 0.0;
+    }
+    F64 sum = 0.0;
+    for (U32 sample = 0; sample < this->m_histCount; sample++) {
+        sum = sum + this->m_hist[index][sample];
+    }
+    const F64 mean = sum / static_cast<F64>(this->m_histCount);
+    F64 square = 0.0;
+    for (U32 sample = 0; sample < this->m_histCount; sample++) {
+        const F64 delta = this->m_hist[index][sample] - mean;
+        square = square + (delta * delta);
+    }
+    return std::sqrt(square / static_cast<F64>(this->m_histCount));
+}
+
+BusMonitor::Decision BusMonitor::evaluate(U64 simTimeNs) const {
+    Decision decision = {Severity::NONE, Mode::NOMINAL, 0, 0};
+    if (this->m_stickySafe) {
+        decision.severity = Severity::CRITICAL;
+        decision.mode = Mode::SAFE;
+        decision.eligible = 1;
+        return decision;
+    }
+    if (this->m_havePower && this->m_socCritSamples >= 5U) {
+        decision.severity = Severity::CRITICAL;
+        decision.mode = Mode::SAFE;
+        decision.eligible = 1;
+        return decision;
+    }
+    if (this->m_haveThermal && this->m_tempCritTiming && simTimeNs >= this->m_tempCritSince &&
+        (simTimeNs - this->m_tempCritSince) >= BusMonitor::TEMP_CRIT_NS) {
+        decision.severity = Severity::CRITICAL;
+        decision.mode = Mode::SAFE;
+        decision.eligible = 1;
+        return decision;
+    }
+    if (this->m_haveAdcs && this->m_dumpTiming && this->m_currentMode == Mode::MOMENTUM_DUMP &&
+        simTimeNs >= this->m_dumpSince && (simTimeNs - this->m_dumpSince) >= BusMonitor::DUMP_RISE_NS &&
+        this->m_maxWheel > this->m_dumpSpeedStart) {
+        decision.severity = Severity::CRITICAL;
+        decision.mode = Mode::SAFE;
+        decision.eligible = 1;
+        return decision;
+    }
+    if (this->m_stickyIsolate) {
+        decision.severity = Severity::WARNING;
+        decision.mode = Mode::ISOLATE_RW;
+        decision.wheel = this->m_isolateWheel;
+        decision.eligible = 2;
+        return decision;
+    }
+    if (this->m_havePower && this->m_socWarnSamples >= 5U) {
+        decision.severity = Severity::WARNING;
+        decision.mode = Mode::LOAD_SHED;
+        decision.eligible = 1;
+        return decision;
+    }
+    if (this->m_haveAdcs && this->m_wheelWarnSamples >= 10U) {
+        decision.severity = Severity::WARNING;
+        decision.mode = Mode::MOMENTUM_DUMP;
+        decision.eligible = 2;
+        return decision;
+    }
+    if (this->m_haveAdcs && this->m_histCount >= BusMonitor::HIST) {
+        U32 highIndex = 4U;
+        U32 highCount = 0;
+        bool quiet = true;
+        for (U32 index = 0; index < 4U; index++) {
+            const F64 spread = this->wheelStddev(index);
+            if (spread > 0.05) {
+                highCount = highCount + 1U;
+                highIndex = index;
+            } else if (!(spread < 0.01)) {
+                quiet = false;
+            }
+        }
+        if (highCount == 1U && quiet && highIndex < 4U) {
+            decision.severity = Severity::WARNING;
+            decision.mode = Mode::ISOLATE_RW;
+            decision.wheel = static_cast<U8>(highIndex);
+            decision.eligible = 2;
+            return decision;
+        }
+    }
+    return decision;
+}
+
+void BusMonitor::publish(U64 simTimeNs) {
+    Decision decision;
+    F64 temp = 0.0;
+    F64 soc = 0.0;
+    F64 maxWheel = 0.0;
+    bool changed = false;
+    {
+        Os::ScopeLock lock(this->m_mutex);
+        decision = this->evaluate(simTimeNs);
+        if (decision.severity == Severity::CRITICAL && decision.mode == Mode::SAFE) {
+            this->m_stickySafe = true;
+        }
+        if (decision.mode == Mode::ISOLATE_RW && decision.severity == Severity::WARNING) {
+            this->m_stickyIsolate = true;
+            this->m_isolateWheel = decision.wheel;
+        }
+        temp = this->m_temp;
+        soc = this->m_soc;
+        maxWheel = this->m_maxWheel;
+        changed = decision.severity != this->m_sentSeverity || decision.mode != this->m_sentMode ||
+                  decision.wheel != this->m_sentWheel;
+        this->m_sentSeverity = decision.severity;
+        this->m_sentMode = decision.mode;
+        this->m_sentWheel = decision.wheel;
+    }
+    if (changed) {
+        this->log_ACTIVITY_HI_Predicate(decision.severity, decision.mode, decision.wheel);
+    }
+    this->tlmWrite_Severity(decision.severity);
+    this->tlmWrite_MaxWheel(maxWheel);
+    this->faultOut_out(0, simTimeNs, decision.severity, decision.mode, decision.wheel, decision.eligible, temp, soc,
+                        maxWheel);
 }
 
 }  // namespace Orbiedge

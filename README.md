@@ -11,7 +11,7 @@ The stand-in attitude controller stays in the Basilisk script: `inertial3D`, `at
 | `sim/scenarios/leo_3u_nominal.py` | 3U LEO scenario, three physical faults, ZeroMQ publisher |
 | `sim/bridge/packet.py` | 256-byte `BSK1` packet |
 | `sim/scenarios/leo_rw_power_fdir.py` | RW-power plant, four HR16 wheels, 10 Hz JSON |
-| `sim/fdir/` | Python flight-rule mirror |
+| `sim/fdir/` | Canned thermal plant for the F´ Phase 1 witness |
 | `sim/canned/` | In-process thermal acceptance and the five-family matrix |
 | `advisor/` | Windows advisor. Sends nothing when the model is absent |
 | `Orbiedge/TelemetryMonitor/` | F Prime active component, `BSK1` subscriber |
@@ -95,7 +95,7 @@ A 121 s `--no-zmq` run on Basilisk 2.12.0 completed 242 steps. The MRP moved fro
 - An accepted packet updates `SimTimeNs`, `q_BN`, `omega_BN_B`, `BusVoltage`, `WheelSpeeds`, `FaultFlags`, and `PacketsAccepted`, emits `PacketAccepted`, and invokes `stateOut` when that port is connected.
 - A bad size, magic, version, or CRC emits `PacketRejected` and does not change the last good telemetry.
 
-`settings.ini` points the framework path at `third_party/fprime`. There is no deployment in this repository yet, so the build produces the static library `libOrbiedge_TelemetryMonitor.a`. It does not produce a bootable binary. A later topology wires `schedIn` to a rate group, the command ports to the command dispatcher, and `stateOut` to whatever records the sample.
+`settings.ini` points the framework path at `third_party/fprime`. `TelemetryMonitor` is still a library with no actuator port. The bootable deployment is `OrbiEdgeApp`. It does not read the 256-byte packet.
 
 F´ `devel` has no Windows platform. Configure on Linux or on WSL Ubuntu. CMake must be 3.26 or newer (`/usr/bin/cmake` on Ubuntu 24.04 is 3.28). The depth-1 F´ pin does not include googletest, so leave `BUILD_TESTING` off. The module requires libzmq (`sudo apt install libzmq3-dev`, or pass `CMAKE_PREFIX_PATH` to a libzmq 4.3 install). The Python tools used here are `fprime-tools==4.4.0`, `fprime-fpp==3.4.0`, and `fprime-jre==25.0.4.1.1`, with `JAVA_HOME` pointed at that JRE.
 
@@ -108,10 +108,10 @@ cmake -S . -B "$HOME/orbiedge-build" -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Rele
   -DBUILD_TESTING=OFF \
   -DFPRIME_ENABLE_FRAMEWORK_UTS=OFF \
   -DFPRIME_ENABLE_AUTOCODER_UTS=OFF
-cmake --build "$HOME/orbiedge-build" --target Orbiedge_TelemetryMonitor
+cmake --build "$HOME/orbiedge-build" --target OrbiEdgeApp
 ```
 
-That build completed on Ubuntu 24.04 in WSL and linked `zmq_connect`, `zmq_msg_recv`, and `zmq_setsockopt` into `Orbiedge_TelemetryMonitor`. The component does not link Basilisk.
+`scripts/build_orbiedge_app.sh` is that configure and build. It completed on UbuntuOEM (Ubuntu 24.04.3) and linked `bin/Linux/OrbiEdgeApp`. The same tree still links `zmq_connect`, `zmq_msg_recv`, and `zmq_setsockopt` into `Orbiedge_TelemetryMonitor`. That component does not link Basilisk. `OrbiEdgeApp` does not link Basilisk or ZeroMQ.
 
 ## Two bridges
 
@@ -123,7 +123,7 @@ One attitude chain remains: `inertial3D`, `attTrackingError`, `mrpFeedback`, `rw
 
 Sensor lines are newline-delimited JSON bound on `127.0.0.1:5600`. Mode lines are read from `127.0.0.1:5601`. Addresses are loopback only.
 
-`sim/fdir/rules.py` is the flight-rule mirror: 10 Hz, four wheels, overspeed at 0.9 of 628.3185307179587 rad/s for 10 samples, dump-rise at 30 s, stddev 1.0 versus 0.2 over 20 samples, SOC 0.30 and 0.15, temperature 40 C and 60 C. Critical faults apply the default mode on that tick. `AGENT.PROPOSE` cannot clear a sticky `ISOLATE_RW` or `SAFE`.
+`sim/fdir/rules.py` is a Python mirror. It is not the mode authority. Its wheel limit is the Honeywell HR16 value 628.32 rad/s and its jitter thresholds are 1.0 and 0.2. The flight `BusMonitor` uses the architecture demo limits: 650 rad/s, warn at 0.9, jitter standard deviation 0.05 against quiet 0.01, SOC 0.30 / 0.15, temperature 40 C / 60 C. Critical faults apply on the next F´ tick. `AGENT.PROPOSE` cannot clear a sticky `ISOLATE_RW` or `SAFE`.
 
 ```text
 python tests/test_fdir_rules.py
@@ -131,20 +131,24 @@ python -m sim.canned.thermal_critical
 python -m sim.canned.run_matrix
 ```
 
-The thermal script ends in `SAFE` with no proposal. The matrix is 5 families by 20 seeds, in process, against the Python mirror. `tests/golden/fdir_matrix_summary.json` records 100 passes. That file is not a Basilisk campaign. A 1 s nominal plant probe and a 3 s jitter probe were run with Basilisk 2.12.0. The jitter family publishes a +/- 3 rad/s square wave on one wheel after 2 s and holds the other three samples. The 100-run Basilisk matrix has not been run.
+Those three commands exercise the Python mirror, not `OrbiEdgeApp`. The thermal script ends in `SAFE` with no proposal. The matrix is 5 families by 20 seeds, in process, against the Python mirror. `tests/golden/fdir_matrix_summary.json` records 100 passes. That file is not a Basilisk campaign. A 1 s nominal plant probe and a 3 s jitter probe were run with Basilisk 2.12.0. The jitter family publishes a +/- 3 rad/s square wave on one wheel after 2 s and holds the other three samples. The 100-run Basilisk matrix has not been run.
 
 ## Advisor
 
-`advisor` is a Windows process. It may emit only `AGENT.PROPOSE` to `127.0.0.1:50001`. It does not open 5600, 5601, or 50000. Parser failure sends nothing. `choose_default` is a test helper and is not transmitted. The opcode in the frame is the string `AGENT.PROPOSE` until a generated F´ dictionary supplies a number.
+`advisor` is a Windows process. It may emit only numeric opcode 0, `AGENT.PROPOSE`, to `127.0.0.1:50001`. It does not open 5600, 5601, or 50000. Parser failure sends nothing. `choose_default` is a test helper and is not transmitted. Opcode 1, `FDIR.CLEAR`, is a human command on the F´ dispatcher. The TCP filter drops it.
 
 Ryzen AI Software 1.8.0 is installed. `onnxruntime_genai` 0.9.2.1 imports. The Llama 3.2 1B hybrid weights are not on disk, nothing was downloaded, and no tokens were generated. `advisor/PROBE.md` records that probe. A cached AMD-OLMo hybrid snapshot is not this model.
 
-## Flight sources
+## Flight deployment
 
-`Orbiedge/SimBridge`, `BusMonitor`, `FdirManager`, and `AgentUplinkFilter` are the F´ sources for the 10 Hz loop. `Orbiedge/FdirRules/FdirRules.hpp` is the C++ mirror of `sim/fdir/rules.py` and does not need the autocoder. `clang++ -std=c++17` compiles `tests/test_fdir_rules.cpp` against that header.
+`OrbiEdgeApp` is an active F´ deployment. `FdirManager` is the only mode authority. `SimBridge` is a TCP client of sensor JSON on `127.0.0.1:5600` and a TCP server for mode JSON on `127.0.0.1:5601` and advisor lines on `127.0.0.1:50001`. It binds `127.0.0.1` only. It does not open `0.0.0.0` or the human GDS port 50000. Each accepted sensor sample calls `Svc.OsTime.setEpoch` with `TB_WORKSTATION_TIME` from `sim_time_ns`. `BusMonitor` is passive and publishes one fault record per committed sample. `AgentUplinkFilter` passes numeric opcode 0 only, drops a proposal more than 5 s of sim time behind, and accepts at most one proposal per 2 s of wall time.
 
-`Orbiedge/Topology/OrbiEdgeTopology.fpp` connects the ports those components declare: `PowerState`, `ThermalState`, `AdcsState`, `FaultRecord`, `modeOut`, and `clearOut`. It does not instance a rate group, a command dispatcher, or the two TCP servers. `Orbiedge/OrbiEdgeDeployment/` and `Orbiedge/FdirTypes/` are not on the configure path. The deployment topology names ports the components do not have, and `FdirTypes.fpp` repeats `module Orbiedge` types with different fields. Nothing here was autocoded, and there is still no bootable binary.
+Phase 1 was run inside UbuntuOEM with the advisor absent:
 
-F´ `devel` has no Windows platform. `Svc/Time` does not exist in the pin. The closest time hook is `Svc.OsTime`: `setEpoch` and the command `SetCurrentTime`. `SimBridge` stores `sim_time_ns` and does not call a guessed time-set port. `nasa/fprime-gds` is not pinned. Basilisk is pinned to `develop`, not a release tag.
+```text
+python3 sim/fdir/canned_plant.py --family thermal-critical
+```
 
-UbuntuOEM (WSL2, Ubuntu 24.04.3 LTS) bound `127.0.0.1` ports 50000, 50001, 5600, and 5601, and a Windows TCP client connected to each. The default WSL distro in this session is `docker-desktop`, which was stopped. That probe did not boot F´. RSS, TTFT, and a Windows power counter were not measured because the specified model was not loaded. `docs/PHASE0.md` records the same facts.
+`scripts/run_phase1.sh` starts `OrbiEdgeApp`, waits until it logs `listening on 5601`, and runs that plant. The plant prints `phase1 SAFE sim_time_ns=25100000000 heater_cleared=1` and exits 0. The flight log for that run is `BusMonitor CRITICAL default SAFE` and `FdirManager mode NOMINAL -> SAFE`, stamped `TB_WORKSTATION_TIME` at 25 s. WSL created the F´ tasks without CPU priority. The acceptance still completed. RSS, TTFT, and a Windows power counter were not measured. The Llama 3.2 1B hybrid weights are not on disk, and no tokens were generated.
+
+The five-family Basilisk matrix has not been run. `nasa/fprime-gds` is not pinned. Basilisk is pinned to `develop`, not a release tag.

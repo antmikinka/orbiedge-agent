@@ -17,12 +17,17 @@ find_package(FPrime REQUIRED PATHS "${FPRIME_FRAMEWORK_PATH}")
 fprime_add_validation_flags()
 add_subdirectory("${FPRIME_FRAMEWORK_PATH}" "F-Prime")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Orbiedge/TelemetryMonitor")
+add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Orbiedge/FdirTypes")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Orbiedge/BusMonitor")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Orbiedge/FdirManager")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Orbiedge/AgentUplinkFilter")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Orbiedge/SimBridge")
+add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Orbiedge/OrbiEdgeDeployment")
 
-# FdirTypes.fpp repeats module Orbiedge types that BusMonitor.fpp already defines.
-# OrbiEdgeDeployment/topology.fpp names ports those components do not have.
-# Neither directory is on this configure path. The matching topology sketch is
-# Orbiedge/Topology/OrbiEdgeTopology.fpp. It has not been autocoded.
+register_fprime_deployment(
+  OrbiEdgeApp
+  SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/Orbiedge/OrbiEdgeDeployment/Main.cpp"
+  DEPENDS
+    Orbiedge_OrbiEdgeDeployment
+)

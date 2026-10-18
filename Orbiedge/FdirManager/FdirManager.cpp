@@ -1,267 +1,273 @@
 #include "Orbiedge/FdirManager/FdirManager.hpp"
 
-namespace {
-
-Orbiedge::FdirRules::Mode toRules(Orbiedge::Mode mode) {
-    switch (mode) {
-        case Orbiedge::Mode::ISOLATE_RW:
-            return Orbiedge::FdirRules::Mode::ISOLATE_RW;
-        case Orbiedge::Mode::MOMENTUM_DUMP:
-            return Orbiedge::FdirRules::Mode::MOMENTUM_DUMP;
-        case Orbiedge::Mode::LOAD_SHED:
-            return Orbiedge::FdirRules::Mode::LOAD_SHED;
-        case Orbiedge::Mode::SAFE:
-            return Orbiedge::FdirRules::Mode::SAFE;
-        case Orbiedge::Mode::NOMINAL:
-        default:
-            return Orbiedge::FdirRules::Mode::NOMINAL;
-    }
-}
-
-Orbiedge::Mode fromRules(Orbiedge::FdirRules::Mode mode) {
-    switch (mode) {
-        case Orbiedge::FdirRules::Mode::ISOLATE_RW:
-            return Orbiedge::Mode::ISOLATE_RW;
-        case Orbiedge::FdirRules::Mode::MOMENTUM_DUMP:
-            return Orbiedge::Mode::MOMENTUM_DUMP;
-        case Orbiedge::FdirRules::Mode::LOAD_SHED:
-            return Orbiedge::Mode::LOAD_SHED;
-        case Orbiedge::FdirRules::Mode::SAFE:
-            return Orbiedge::Mode::SAFE;
-        case Orbiedge::FdirRules::Mode::NOMINAL:
-        default:
-            return Orbiedge::Mode::NOMINAL;
-    }
-}
-
-Orbiedge::Severity fromSeverity(Orbiedge::FdirRules::Severity severity) {
-    switch (severity) {
-        case Orbiedge::FdirRules::Severity::WARNING:
-            return Orbiedge::Severity::WARNING;
-        case Orbiedge::FdirRules::Severity::CRITICAL:
-            return Orbiedge::Severity::CRITICAL;
-        case Orbiedge::FdirRules::Severity::NONE:
-        default:
-            return Orbiedge::Severity::NONE;
-    }
-}
-
-Orbiedge::FdirRules::Severity toSeverity(Orbiedge::Severity severity) {
-    switch (severity) {
-        case Orbiedge::Severity::WARNING:
-            return Orbiedge::FdirRules::Severity::WARNING;
-        case Orbiedge::Severity::CRITICAL:
-            return Orbiedge::FdirRules::Severity::CRITICAL;
-        case Orbiedge::Severity::NONE:
-        default:
-            return Orbiedge::FdirRules::Severity::NONE;
-    }
-}
-
-Orbiedge::Disposition fromDisposition(Orbiedge::FdirRules::Disposition disposition) {
-    switch (disposition) {
-        case Orbiedge::FdirRules::Disposition::AGREE:
-            return Orbiedge::Disposition::AGREE;
-        case Orbiedge::FdirRules::Disposition::DISAGREE:
-            return Orbiedge::Disposition::DISAGREE;
-        case Orbiedge::FdirRules::Disposition::LATE:
-            return Orbiedge::Disposition::LATE;
-        case Orbiedge::FdirRules::Disposition::REJECT:
-            return Orbiedge::Disposition::REJECT;
-        case Orbiedge::FdirRules::Disposition::HOLD_INVALID:
-            return Orbiedge::Disposition::HOLD_INVALID;
-        case Orbiedge::FdirRules::Disposition::NONE:
-        default:
-            return Orbiedge::Disposition::NONE;
-    }
-}
-
-}  // namespace
-
 namespace Orbiedge {
 
 FdirManager::FdirManager(const char* const compName)
     : FdirManagerComponentBase(compName),
-      m_haveRecord(false),
-      m_haveProposal(false),
-      m_havePublished(false),
-      m_publishedMode(Mode::NOMINAL),
-      m_sent(false),
-      m_sentMode(Mode::NOMINAL),
-      m_sentWheel(0),
-      m_holdLatched(false),
-      m_tempWarnLatched(false) {
-    this->m_proposal.opcode = FdirRules::OPCODE_PROPOSE;
-    this->m_proposal.action = FdirRules::Mode::NOMINAL;
-    this->m_proposal.wheel_index = 0;
-    this->m_proposal.confidence = 0.0f;
-    this->m_proposal.sim_time_ns = 0;
-    this->m_proposal.wall_time_ns = 0;
+      m_mutex(),
+      m_fault{},
+      m_proposal{},
+      m_sensorValid(false),
+      m_haveSensor(false),
+      m_mode(Mode::NOMINAL),
+      m_wheel(0),
+      m_stickySafe(false),
+      m_stickyIsolate(false),
+      m_windowOpen(false),
+      m_windowStart(0),
+      m_windowDefault(Mode::NOMINAL),
+      m_quietTiming(false),
+      m_quietSince(0),
+      m_disposition(Disposition::NONE),
+      m_lastProposal(Mode::NOMINAL) {
+    this->m_fault.fresh = false;
+    this->m_fault.severity = Severity::NONE;
+    this->m_fault.modeDefault = Mode::NOMINAL;
+    this->m_proposal.pending = false;
+    this->m_proposal.action = Mode::NOMINAL;
 }
 
-FdirManager::~FdirManager() = default;
+FdirManager::~FdirManager() {}
 
-void FdirManager::faultIn_handler(FwIndexType portNum, U64 simTimeNs, U8 eligible, const Mode& defaultMode,
-                                  const Severity& severity, U8 wheelIndex, bool sensorValid, bool quiet, bool tempWarn,
-                                  F64 soc, F64 solarScale, F64 tempC, F64 wheel0, F64 wheel1, F64 wheel2, F64 wheel3,
-                                  F64 std0, F64 std1, F64 std2, F64 std3) {
+void FdirManager::faultIn_handler(FwIndexType portNum,
+                                  U64 simTimeNs,
+                                  const Severity& faultSeverity,
+                                  const Mode& modeDefault,
+                                  U8 wheelIndex,
+                                  U8 eligibleCount,
+                                  F64 tempC,
+                                  F64 soc,
+                                  F64 maxWheel) {
     (void)portNum;
     Os::ScopeLock lock(this->m_mutex);
-    FdirRules::FaultRecord record{};
-    record.sim_time_ns = simTimeNs;
-    record.eligible = eligible;
-    record.default_mode = toRules(defaultMode);
-    record.severity = toSeverity(severity);
-    record.wheel_index = wheelIndex;
-    record.sensor_valid = sensorValid;
-    record.quiet = quiet;
-    record.temp_warn_event = tempWarn;
-    record.soc = soc;
-    record.solar_scale = solarScale;
-    record.temp_c = tempC;
-    record.wheel_speed_rad_s[0] = wheel0;
-    record.wheel_speed_rad_s[1] = wheel1;
-    record.wheel_speed_rad_s[2] = wheel2;
-    record.wheel_speed_rad_s[3] = wheel3;
-    record.wheel_stddev[0] = std0;
-    record.wheel_stddev[1] = std1;
-    record.wheel_stddev[2] = std2;
-    record.wheel_stddev[3] = std3;
-    this->m_record = record;
-    this->m_haveRecord = true;
+    this->m_fault.fresh = true;
+    this->m_fault.simTimeNs = simTimeNs;
+    this->m_fault.severity = faultSeverity;
+    this->m_fault.modeDefault = modeDefault;
+    this->m_fault.wheelIndex = wheelIndex;
+    this->m_fault.eligibleCount = eligibleCount;
+    this->m_fault.tempC = tempC;
+    this->m_fault.soc = soc;
+    this->m_fault.maxWheel = maxWheel;
 }
 
-void FdirManager::AGENT_PROPOSE_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, const Mode& action, U8 wheel_index,
-                                           F32 confidence, U64 sim_time_ns) {
-    if (wheel_index > 3 || !(confidence >= 0.0f && confidence <= 1.0f)) {
-        this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::VALIDATION_ERROR);
+void FdirManager::sensorValid_handler(FwIndexType portNum, bool valid) {
+    (void)portNum;
+    Os::ScopeLock lock(this->m_mutex);
+    this->m_haveSensor = true;
+    this->m_sensorValid = valid;
+}
+
+void FdirManager::storeProposal(Mode action, U8 wheelIndex, F32 confidence, U64 simTimeNs) {
+    Os::ScopeLock lock(this->m_mutex);
+    this->m_proposal.pending = true;
+    this->m_proposal.action = action;
+    this->m_proposal.wheelIndex = wheelIndex;
+    this->m_proposal.confidence = confidence;
+    this->m_proposal.simTimeNs = simTimeNs;
+    this->m_lastProposal = action;
+}
+
+void FdirManager::proposalIn_handler(FwIndexType portNum,
+                                     U32 opcode,
+                                     const Mode& action,
+                                     U8 wheelIndex,
+                                     F32 confidence,
+                                     U64 simTimeNs) {
+    (void)portNum;
+    if (opcode != 0U) {
+        this->noteDisposition(Disposition::REJECT, action);
         return;
     }
-    {
-        Os::ScopeLock lock(this->m_mutex);
-        this->m_proposal.opcode = FdirRules::OPCODE_PROPOSE;
-        this->m_proposal.action = toRules(action);
-        this->m_proposal.wheel_index = wheel_index;
-        this->m_proposal.confidence = confidence;
-        this->m_proposal.sim_time_ns = sim_time_ns;
-        this->m_proposal.wall_time_ns = 0;
-        this->m_haveProposal = true;
-    }
+    this->storeProposal(action, wheelIndex, confidence, simTimeNs);
+}
+
+void FdirManager::AGENT_PROPOSE_cmdHandler(FwOpcodeType opCode,
+                                           U32 cmdSeq,
+                                           const Mode& action,
+                                           U8 wheelIndex,
+                                           F32 confidence,
+                                           U64 simTimeNs) {
+    this->storeProposal(action, wheelIndex, confidence, simTimeNs);
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
 
 void FdirManager::FDIR_CLEAR_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
-    this->m_rules.clear_manager();
-    if (this->isConnected_clearOut_OutputPort(0)) {
-        this->clearOut_out(0, true);
+    {
+        Os::ScopeLock lock(this->m_mutex);
+        this->m_stickySafe = false;
+        this->m_stickyIsolate = false;
+        this->m_windowOpen = false;
     }
-    this->m_havePublished = true;
-    if (this->m_publishedMode != Mode::NOMINAL) {
-        this->log_ACTIVITY_HI_ModeTransition(this->m_publishedMode, Mode::NOMINAL, 0);
-    }
-    this->m_publishedMode = Mode::NOMINAL;
-    this->m_sent = true;
-    this->m_sentMode = Mode::NOMINAL;
-    this->m_sentWheel = 0;
-    if (this->isConnected_modeOut_OutputPort(0)) {
-        this->modeOut_out(0, 0, Mode::NOMINAL, 0);
-    }
-    if (this->isConnected_modeToMonitor_OutputPort(0)) {
-        this->modeToMonitor_out(0, 0, Mode::NOMINAL, 0);
-    }
-    this->tlmWrite_MODE(Mode::NOMINAL);
+    this->clearStickyOut_out(0, 1);
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
 
-void FdirManager::schedIn_handler(FwIndexType portNum, U32 context) {
-    (void)portNum;
-    (void)context;
-    FdirRules::FaultRecord record{};
-    FdirRules::Proposal proposal{};
-    bool have_record = false;
-    bool have_proposal = false;
-    {
-        Os::ScopeLock lock(this->m_mutex);
-        have_record = this->m_haveRecord;
-        record = this->m_record;
-        have_proposal = this->m_haveProposal;
-        proposal = this->m_proposal;
-        this->m_haveProposal = false;
+bool FdirManager::actionAllowed(Mode modeDefault, U8 eligibleCount, Mode action) const {
+    if (eligibleCount <= 1U) {
+        return action == modeDefault;
     }
-    if (!have_record) {
-        this->tlmWrite_SENSOR_VALID(false);
-        return;
+    if (modeDefault == Mode::MOMENTUM_DUMP) {
+        return action == Mode::MOMENTUM_DUMP || action == Mode::SAFE;
     }
-    const FdirRules::Decision decision = this->m_rules.decide(record, have_proposal ? &proposal : nullptr);
-    this->publish(decision, record);
+    if (modeDefault == Mode::ISOLATE_RW) {
+        return action == Mode::ISOLATE_RW || action == Mode::NOMINAL;
+    }
+    return action == modeDefault;
 }
 
-void FdirManager::publish(const FdirRules::Decision& decision, const FdirRules::FaultRecord& record) {
-    const Mode mode = fromRules(decision.mode);
-    const Mode last = fromRules(decision.last_proposal);
-    WheelF64 speeds;
-    WheelF64 deviation;
-    for (int wheel = 0; wheel < 4; ++wheel) {
-        speeds[wheel] = record.wheel_speed_rad_s[wheel];
-        deviation[wheel] = record.wheel_stddev[wheel];
-    }
-    this->tlmWrite_MODE(mode);
-    this->tlmWrite_SEVERITY(fromSeverity(decision.severity));
-    this->tlmWrite_ELIGIBLE(decision.eligible);
-    this->tlmWrite_SOC(record.soc);
-    this->tlmWrite_SOLAR_SCALE(record.solar_scale);
-    this->tlmWrite_WHEEL_SPEED(speeds);
-    this->tlmWrite_WHEEL_STDDEV(deviation);
-    this->tlmWrite_TEMP_C(record.temp_c);
-    this->tlmWrite_SENSOR_VALID(decision.sensor_valid);
-    this->tlmWrite_LAST_PROPOSAL(last);
-    this->tlmWrite_PROPOSAL_DISPOSITION(fromDisposition(decision.disposition));
-    this->tlmWrite_SIM_TIME_NS(decision.sim_time_ns);
+void FdirManager::noteDisposition(Disposition disposition, Mode action) {
+    this->m_disposition = disposition;
+    this->m_lastProposal = action;
+    this->log_ACTIVITY_LO_ProposalResult(disposition, action);
+}
 
-    if (!this->m_havePublished) {
-        this->m_havePublished = true;
-        this->m_publishedMode = mode;
-        if (mode != Mode::NOMINAL) {
-            this->log_ACTIVITY_HI_ModeTransition(Mode::NOMINAL, mode, decision.sim_time_ns);
+void FdirManager::setMode(U64 simTimeNs, Mode mode, U8 wheelIndex) {
+    const Mode previous = this->m_mode;
+    this->m_mode = mode;
+    this->m_wheel = wheelIndex;
+    if (mode == Mode::SAFE) {
+        this->m_stickySafe = true;
+    }
+    if (mode == Mode::ISOLATE_RW) {
+        this->m_stickyIsolate = true;
+    }
+    if (previous != mode) {
+        this->log_ACTIVITY_HI_ModeTransition(previous, mode);
+    }
+    this->tlmWrite_Mode(mode);
+    this->modeOut_out(0, simTimeNs, mode, wheelIndex);
+    this->modeEcho_out(0, simTimeNs, mode, wheelIndex);
+}
+
+void FdirManager::applyTick(const Fault& fault, bool sensorValid, Proposal& proposal) {
+    this->tlmWrite_SensorValid(sensorValid);
+    this->tlmWrite_SimTimeNs(fault.simTimeNs);
+    this->tlmWrite_Soc(fault.soc);
+    this->tlmWrite_TempC(fault.tempC);
+    this->tlmWrite_Severity(fault.severity);
+    this->tlmWrite_EligibleCount(fault.eligibleCount);
+    this->tlmWrite_Mode(this->m_mode);
+    this->tlmWrite_LastProposal(this->m_lastProposal);
+    this->tlmWrite_ProposalDisposition(this->m_disposition);
+
+    if (!sensorValid) {
+        this->m_disposition = Disposition::HOLD_INVALID;
+        this->tlmWrite_ProposalDisposition(this->m_disposition);
+        this->m_windowOpen = false;
+        this->m_quietTiming = false;
+        return;
+    }
+    if (!fault.fresh) {
+        return;
+    }
+
+    if (this->m_stickySafe) {
+        this->setMode(fault.simTimeNs, Mode::SAFE, this->m_wheel);
+        proposal.pending = false;
+        return;
+    }
+
+    if (fault.severity == Severity::CRITICAL) {
+        this->m_windowOpen = false;
+        this->m_quietTiming = false;
+        U8 wheel = fault.wheelIndex;
+        if (proposal.pending) {
+            this->noteDisposition(Disposition::DISAGREE, proposal.action);
+            proposal.pending = false;
         }
-    } else if (mode != this->m_publishedMode) {
-        this->log_ACTIVITY_HI_ModeTransition(this->m_publishedMode, mode, decision.sim_time_ns);
-        this->m_publishedMode = mode;
+        this->setMode(fault.simTimeNs, fault.modeDefault, wheel);
+        return;
     }
 
-    if (decision.disposition == FdirRules::Disposition::HOLD_INVALID) {
-        if (!this->m_holdLatched) {
-            this->m_holdLatched = true;
-            this->log_WARNING_LO_HoldInvalid(decision.sim_time_ns);
+    if (fault.severity == Severity::WARNING && fault.eligibleCount <= 1U) {
+        this->m_windowOpen = false;
+        this->m_quietTiming = false;
+        if (proposal.pending) {
+            const Disposition disposition =
+                this->actionAllowed(fault.modeDefault, fault.eligibleCount, proposal.action) ? Disposition::AGREE
+                                                                                              : Disposition::DISAGREE;
+            this->noteDisposition(disposition, proposal.action);
+            proposal.pending = false;
         }
-    } else {
-        this->m_holdLatched = false;
+        this->setMode(fault.simTimeNs, fault.modeDefault, fault.wheelIndex);
+        return;
     }
 
-    if (decision.disposition != FdirRules::Disposition::NONE &&
-        decision.disposition != FdirRules::Disposition::HOLD_INVALID) {
-        this->log_ACTIVITY_LO_ProposalScored(fromDisposition(decision.disposition), last);
-    }
-
-    if (decision.temp_warn_event && !this->m_tempWarnLatched) {
-        this->m_tempWarnLatched = true;
-        this->log_ACTIVITY_LO_TempWarn(record.temp_c);
-    }
-    if (!decision.temp_warn_event) {
-        this->m_tempWarnLatched = false;
-    }
-
-    if (!this->m_sent || mode != this->m_sentMode || decision.wheel_index != this->m_sentWheel) {
-        this->m_sent = true;
-        this->m_sentMode = mode;
-        this->m_sentWheel = decision.wheel_index;
-        if (this->isConnected_modeOut_OutputPort(0)) {
-            this->modeOut_out(0, decision.sim_time_ns, mode, decision.wheel_index);
+    if (fault.severity == Severity::WARNING && fault.eligibleCount > 1U) {
+        this->m_quietTiming = false;
+        if (!this->m_windowOpen || this->m_windowDefault != fault.modeDefault) {
+            this->m_windowOpen = true;
+            this->m_windowStart = fault.simTimeNs;
+            this->m_windowDefault = fault.modeDefault;
         }
-        if (this->isConnected_modeToMonitor_OutputPort(0)) {
-            this->modeToMonitor_out(0, decision.sim_time_ns, mode, decision.wheel_index);
+        const bool expired =
+            fault.simTimeNs >= this->m_windowStart && (fault.simTimeNs - this->m_windowStart) >= FdirManager::WINDOW_NS;
+        if (proposal.pending) {
+            const bool confidenceOk = proposal.confidence >= 0.0F && proposal.confidence <= 1.0F;
+            const bool wheelOk = proposal.wheelIndex <= 3U;
+            const bool inWindow = proposal.simTimeNs >= this->m_windowStart &&
+                                  proposal.simTimeNs <= (this->m_windowStart + FdirManager::WINDOW_NS);
+            if (!confidenceOk || !wheelOk) {
+                this->noteDisposition(Disposition::REJECT, proposal.action);
+            } else if (!inWindow) {
+                this->noteDisposition(Disposition::LATE, proposal.action);
+            } else if (!this->actionAllowed(fault.modeDefault, fault.eligibleCount, proposal.action)) {
+                this->noteDisposition(Disposition::DISAGREE, proposal.action);
+            } else if (this->m_stickyIsolate && proposal.action != Mode::ISOLATE_RW) {
+                this->noteDisposition(Disposition::DISAGREE, proposal.action);
+            } else {
+                this->noteDisposition(Disposition::AGREE, proposal.action);
+                U8 wheel = fault.wheelIndex;
+                if (proposal.action == Mode::ISOLATE_RW) {
+                    wheel = proposal.wheelIndex;
+                }
+                this->setMode(fault.simTimeNs, proposal.action, wheel);
+                this->m_windowOpen = false;
+                proposal.pending = false;
+                return;
+            }
+            proposal.pending = false;
+        }
+        if (expired) {
+            this->setMode(fault.simTimeNs, fault.modeDefault, fault.wheelIndex);
+            this->m_windowOpen = false;
+        }
+        return;
+    }
+
+    this->m_windowOpen = false;
+    if (this->m_stickyIsolate) {
+        this->setMode(fault.simTimeNs, Mode::ISOLATE_RW, this->m_wheel);
+        return;
+    }
+    if (!this->m_quietTiming) {
+        this->m_quietTiming = true;
+        this->m_quietSince = fault.simTimeNs;
+        return;
+    }
+    if (fault.simTimeNs >= this->m_quietSince && (fault.simTimeNs - this->m_quietSince) >= FdirManager::QUIET_NS &&
+        this->m_mode != Mode::NOMINAL) {
+        this->setMode(fault.simTimeNs, Mode::NOMINAL, 0);
+    }
+}
+
+void FdirManager::run_handler(FwIndexType portNum, U32 context) {
+    (void)portNum;
+    (void)context;
+    Fault fault;
+    Proposal proposal;
+    bool sensorValid = false;
+    {
+        Os::ScopeLock lock(this->m_mutex);
+        fault = this->m_fault;
+        proposal = this->m_proposal;
+        sensorValid = this->m_sensorValid;
+        if (sensorValid) {
+            this->m_proposal.pending = false;
         }
     }
+    this->applyTick(fault, sensorValid, proposal);
 }
 
 }  // namespace Orbiedge

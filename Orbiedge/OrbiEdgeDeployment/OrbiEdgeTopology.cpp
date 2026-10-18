@@ -14,7 +14,7 @@ Svc::ActiveRateGroup::ContextArray rateContext(0);
 void configureTopology() {
     rateGroupDriver.configure(rateDividers);
     rateGroup10Hz.configure(rateContext);
-    cmdSeq.allocateBuffer(0, mallocAllocator, 5 * 1024);
+    commandSeq.allocateBuffer(0, mallocAllocator, 5 * 1024);
     simBridge.startSockets();
 }
 
@@ -43,7 +43,7 @@ void stopRateGroups() {
 void teardownTopology(const TopologyState& state) {
     stopTasks(state);
     freeThreads(state);
-    cmdSeq.deallocateBuffer(mallocAllocator);
+    commandSeq.deallocateBuffer(mallocAllocator);
     tearDownComponents(state);
     deinitComponents(state);
 }

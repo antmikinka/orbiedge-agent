@@ -8,13 +8,5 @@ cd /mnt/c/Users/antmi/Downloads/orbiedge-agent
   -DBUILD_TESTING=OFF \
   -DFPRIME_ENABLE_FRAMEWORK_UTS=OFF \
   -DFPRIME_ENABLE_AUTOCODER_UTS=OFF
-# Component libraries only. OrbiEdgeDeployment is not a CMake target.
-# This script has not been run against the current tree.
-/usr/bin/cmake --build "${HOME}/orbiedge-build" --target \
-  Orbiedge_TelemetryMonitor \
-  Orbiedge_BusMonitor \
-  Orbiedge_FdirManager \
-  Orbiedge_AgentUplinkFilter \
-  Orbiedge_SimBridge \
-  -j 4
+/usr/bin/cmake --build "${HOME}/orbiedge-build" --target OrbiEdgeApp -j 4
 echo BUILD_OK

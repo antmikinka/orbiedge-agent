@@ -1,17 +1,22 @@
 module Orbiedge {
 
-  @ Passive filter in front of CmdDispatcher source port 1.
-  @ Forwards only AGENT.PROPOSE that passes the stale-time and wall-rate checks.
-  @ FDIR.CLEAR and every other opcode increment CommandsDropped.
+  @ Passes opcode 0 only. Drops FDIR.CLEAR and every other opcode.
+  @ Staleness uses sim time. The one-proposal cap uses wall time.
   passive component AgentUplinkFilter {
 
-    sync input port uplinkIn: Proposal
+    sync input port proposalIn: Proposal
 
-    output port forwardOut: Proposal
+    sync input port setTime: SimTimeStamp
 
-    telemetry CommandsDropped: U32 id 0
+    output port acceptOut: Proposal
+
+    telemetry Drops: U32 id 0
+
+    telemetry Accepts: U32 id 1
 
     import Fw.Channel
+
+    import Fw.Event
 
     time get port timeGetOut
 

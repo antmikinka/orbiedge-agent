@@ -1,6 +1,3 @@
-# Not on the configure path. The connections below name ports that
-# SimBridge, BusMonitor, FdirManager, and AgentUplinkFilter do not declare.
-# The matching sketch is Orbiedge/Topology/OrbiEdgeTopology.fpp.
 module Orbiedge {
 
   deployment topology OrbiEdge {
@@ -19,7 +16,7 @@ module Orbiedge {
     instance tlmSend
     instance fatalHandler
     instance fatalAdapter
-    instance cmdSeq
+    instance commandSeq
 
     command connections instance cmdDisp
 
@@ -42,7 +39,7 @@ module Orbiedge {
       rateGroup10Hz.RateGroupMemberOut[1] -> fdirManager.run
       rateGroup10Hz.RateGroupMemberOut[2] -> cmdDisp.run
       rateGroup10Hz.RateGroupMemberOut[3] -> events.run
-      rateGroup10Hz.RateGroupMemberOut[4] -> cmdSeq.schedIn
+      rateGroup10Hz.RateGroupMemberOut[4] -> commandSeq.schedIn
     }
 
     connections Fdir {
@@ -62,8 +59,8 @@ module Orbiedge {
     }
 
     connections Sequences {
-      cmdSeq.comCmdOut -> cmdDisp.seqCmdBuff[0]
-      cmdDisp.seqCmdStatus[0] -> cmdSeq.cmdResponseIn
+      commandSeq.comCmdOut -> cmdDisp.seqCmdBuff[0]
+      cmdDisp.seqCmdStatus[0] -> commandSeq.cmdResponseIn
     }
 
   }
